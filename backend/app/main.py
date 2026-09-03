@@ -19,3 +19,8 @@ def health_check(db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"Database connection failed: {e}")
         raise HTTPException(status_code=503, detail="Database connection failed")
+
+from app.api import webhooks, harness, refunds
+app.include_router(webhooks.router)
+app.include_router(harness.router)
+app.include_router(refunds.router)
