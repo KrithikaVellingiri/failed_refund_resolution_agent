@@ -1,0 +1,30 @@
+.container {
+  padding: var(--spacing-sm) var(--spacing-md);
+  margin-bottom: var(--spacing-sm);
+  border-radius: 8px;
+}
+
+.strong {
+  background-color: var(--color-evidence-strong-bg);
+}
+
+.moderate {
+  background-color: var(--color-evidence-moderate-bg);
+}
+
+.weak {
+  border: 1px solid var(--color-evidence-weak-border);
+  background-color: transparent;
+}
+
+.caption {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.content {
+  font-size: 0.875rem;
+}

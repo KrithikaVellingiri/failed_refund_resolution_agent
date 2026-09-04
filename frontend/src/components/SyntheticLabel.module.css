@@ -1,0 +1,14 @@
+.label {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border: 1px dashed var(--color-synthetic-border);
+  background-color: var(--color-synthetic-bg);
+  color: var(--color-synthetic-text);
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  margin-left: var(--spacing-sm);
+  white-space: nowrap;
+}

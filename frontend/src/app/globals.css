@@ -1,0 +1,79 @@
+:root {
+  --color-bg: #f8fafc; /* slate 50 */
+  --color-surface: #ffffff;
+  --color-border: #e2e8f0; /* slate 200 */
+  
+  --color-text-primary: #0f172a; /* slate 900 */
+  --color-text-secondary: #475569; /* slate 600 */
+  --color-text-muted: #94a3b8; /* slate 400 */
+  
+  /* Status colors matching frontend-design.md */
+  --color-status-approve: #10b981; /* emerald 500 */
+  --color-status-review: #f59e0b; /* amber 500 */
+  --color-status-reject: #ef4444; /* red 500 */
+  --color-status-payout-success: #64748b; /* slate 500 */
+  --color-status-duplicate: #8b5cf6; /* violet 500 */
+  --color-status-failed: #9ca3af; /* gray 400 */
+  --color-status-type1: #cbd5e1; /* slate 300 */
+  
+  /* Evidence Tiers */
+  --color-evidence-strong-bg: #e2e8f0;
+  --color-evidence-moderate-bg: #f1f5f9;
+  --color-evidence-weak-border: #cbd5e1;
+  
+  /* Synthetic */
+  --color-synthetic-border: #c084fc; /* purple 400 */
+  --color-synthetic-text: #7e22ce; /* purple 700 */
+  --color-synthetic-bg: #faf5ff; /* purple 50 */
+
+  /* Fonts */
+  --font-serif: "Georgia", "Times New Roman", serif;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "ui-monospace", "SFMono-Regular", "Menlo", "Monaco", "Consolas", monospace;
+  
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  margin: 0 0 var(--spacing-md) 0;
+}
+
+/* Base styles for tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+}
+
+th {
+  color: var(--color-text-secondary);
+  font-weight: 500;
+  font-size: 0.875rem;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}

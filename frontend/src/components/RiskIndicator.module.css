@@ -1,0 +1,21 @@
+.container {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.green { background-color: var(--color-status-approve); }
+.amber { background-color: var(--color-status-review); }
+.red { background-color: var(--color-status-reject); }
+
+.score {
+  font-family: var(--font-serif);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
