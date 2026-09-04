@@ -52,7 +52,9 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
     payment_id = refund_entity.get("payment_id")
     amount = refund_entity.get("amount")
     status = refund_entity.get("status")
-    failure_reason = refund_entity.get("error_reason") or refund_entity.get("error_description")
+    error_reason = refund_entity.get("error_reason")
+    error_description = refund_entity.get("error_description")
+    failure_reason = error_reason or error_description
     speed_requested = refund_entity.get("speed_requested")
     speed_processed = refund_entity.get("speed_processed")
     
@@ -92,6 +94,45 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
         }
     )
     
+    # Task 4: Classifier Integration
+    if status == "failed":
+        from app.services.classifier import classify_refund_failure, FailureType
+        
+        f_type, c_source = classify_refund_failure(error_reason, error_description)
+        
+        # 1. Create case directly in REFUND_FAILED state
+        # DO NOTHING on conflict, so we don't recreate a case for a retry
+        db.execute(
+            text("""
+                INSERT INTO refund_cases (refund_id, failure_type, classification_source, state)
+                VALUES (:refund_id, :failure_type, :classification_source, 'REFUND_FAILED')
+                ON CONFLICT (refund_id) DO NOTHING
+                RETURNING case_id
+            """),
+            {"refund_id": refund_id, "failure_type": f_type.value, "classification_source": c_source.value}
+        )
+        
+        # We only advance the state if we actually created it or if we are actively transitioning it now
+        # For simplicity, we just try to progress it if it is still in REFUND_FAILED
+        db.execute(
+            text("""
+                UPDATE refund_cases 
+                SET state = 'CLASSIFIED', updated_at = now()
+                WHERE refund_id = :refund_id AND state = 'REFUND_FAILED'
+            """),
+            {"refund_id": refund_id}
+        )
+        
+        if f_type == FailureType.TYPE_2_DESTINATION_UNAVAILABLE:
+            db.execute(
+                text("""
+                    UPDATE refund_cases 
+                    SET state = 'AWAITING_ALTERNATE', updated_at = now()
+                    WHERE refund_id = :refund_id AND state = 'CLASSIFIED'
+                """),
+                {"refund_id": refund_id}
+            )
+        
     db.commit()
     
     return {"status": "success"}

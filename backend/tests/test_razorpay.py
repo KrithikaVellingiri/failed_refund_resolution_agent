@@ -127,7 +127,7 @@ class TestRazorpay(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
 
-    def test_webhook_refund_failed(self):
+    def test_webhook_refund_failed_type_2_transition(self):
         payload = {
             "event": "refund.failed",
             "payload": {
@@ -137,7 +137,7 @@ class TestRazorpay(unittest.TestCase):
                         "payment_id": "pay_123",
                         "amount": 1000,
                         "status": "failed",
-                        "error_reason": "destination_unavailable"
+                        "error_reason": "account_closed"
                     }
                 }
             }
@@ -155,13 +155,89 @@ class TestRazorpay(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         
-        # Verify that it DID NOT try to insert refund_cases
+        # Verify that it DID insert refund_cases and progressed to AWAITING_ALTERNATE
         execute_calls = self.mock_db.execute.call_args_list
         found_case_insert = any(
             len(call.args) > 0 and hasattr(call.args[0], 'text') and "INSERT INTO refund_cases" in call.args[0].text 
             for call in execute_calls
         )
-        self.assertFalse(found_case_insert)
+        self.assertTrue(found_case_insert)
+        
+        found_awaiting_alt = any(
+            len(call.args) > 0 and hasattr(call.args[0], 'text') and "SET state = 'AWAITING_ALTERNATE'" in call.args[0].text 
+            for call in execute_calls
+        )
+        self.assertTrue(found_awaiting_alt)
+
+    def test_webhook_refund_failed_type_1_matched_no_transition(self):
+        payload = {
+            "event": "refund.failed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_123",
+                        "payment_id": "pay_123",
+                        "amount": 1000,
+                        "status": "failed",
+                        "error_reason": "bank_processing_error"
+                    }
+                }
+            }
+        }
+        sig = self._generate_signature(payload)
+        
+        mock_result = MagicMock()
+        mock_result.scalar.return_value = 1
+        self.mock_db.execute.return_value = mock_result
+        
+        response = self.client.post(
+            "/webhooks/razorpay", 
+            content=json.dumps(payload, separators=(',', ':')).encode('utf-8'), 
+            headers={"x-razorpay-signature": sig}
+        )
+        self.assertEqual(response.status_code, 200)
+        
+        execute_calls = self.mock_db.execute.call_args_list
+        found_awaiting_alt = any(
+            len(call.args) > 0 and hasattr(call.args[0], 'text') and "SET state = 'AWAITING_ALTERNATE'" in call.args[0].text 
+            for call in execute_calls
+        )
+        self.assertFalse(found_awaiting_alt)
+
+    def test_webhook_refund_failed_type_1_unrecognized_no_transition(self):
+        payload = {
+            "event": "refund.failed",
+            "payload": {
+                "refund": {
+                    "entity": {
+                        "id": "rfnd_123",
+                        "payment_id": "pay_123",
+                        "amount": 1000,
+                        "status": "failed",
+                        "error_reason": "weird_error_123"
+                    }
+                }
+            }
+        }
+        sig = self._generate_signature(payload)
+        
+        mock_result = MagicMock()
+        mock_result.scalar.return_value = 1
+        self.mock_db.execute.return_value = mock_result
+        
+        response = self.client.post(
+            "/webhooks/razorpay", 
+            content=json.dumps(payload, separators=(',', ':')).encode('utf-8'), 
+            headers={"x-razorpay-signature": sig}
+        )
+        self.assertEqual(response.status_code, 200)
+        
+        execute_calls = self.mock_db.execute.call_args_list
+        found_awaiting_alt = any(
+            len(call.args) > 0 and hasattr(call.args[0], 'text') and "SET state = 'AWAITING_ALTERNATE'" in call.args[0].text 
+            for call in execute_calls
+        )
+        self.assertFalse(found_awaiting_alt)
 
     def test_webhook_refund_speed_changed(self):
         payload = {
