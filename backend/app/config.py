@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str | None = None
     LLM_MODEL_VERSION: str | None = None
     PROMPT_VERSION: str | None = None
+    RAZORPAYX_ACCOUNT_NUMBER: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env")
 
