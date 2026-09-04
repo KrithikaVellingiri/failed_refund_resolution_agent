@@ -8,6 +8,9 @@ class Settings(BaseSettings):
     RAZORPAY_WEBHOOK_SECRET: str | None = None
     LLM_API_KEY: str | None = None
     AUTO_APPROVAL_LIMIT: float | None = None
+    GEMINI_API_KEY: str | None = None
+    LLM_MODEL_VERSION: str | None = None
+    PROMPT_VERSION: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env")
 
