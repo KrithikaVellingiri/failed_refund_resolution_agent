@@ -4,15 +4,216 @@ from sqlalchemy import text
 from enum import Enum
 from pydantic import BaseModel, Field, field_validator
 import logging
+from typing import List, Optional
 from app.db.database import get_db, SessionLocal
 from app.schemas.state import CaseState
+from app.schemas.frontend import CaseListItem, CaseDetail, RefundInfo, CustomerInfo, ProposedDestination, ClaimCheck, RiskSignals, MessageRiskFlags, AuditEvent
 from app.services.state_machine import validate_transition, InvalidTransitionError
 from app.services.duplicate_guard import execute_with_duplicate_guard, DuplicateGuardBlocked
 from app.services.razorpay_client import create_payout
+from app.services.evidence import aggregate_evidence
+from app.services.contradiction_checker import check_claims
+from app.services.llm_client import ExtractedClaims
+from app.services.policy import evaluate_policy, compute_risk_score
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/cases", tags=["cases"])
+
+@router.get("", response_model=List[CaseListItem])
+def get_cases(
+    state: Optional[str] = None,
+    decision: Optional[str] = None,
+    failure_type: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    query = """
+        SELECT c.case_id, r.amount, c.failure_type, c.risk_score, 
+               c.evidence_coverage, c.decision, c.state, c.created_at
+        FROM refund_cases c
+        JOIN refunds r ON c.refund_id = r.refund_id
+        WHERE 1=1
+    """
+    params = {}
+    if state:
+        query += " AND c.state = :state"
+        params["state"] = state
+    if decision:
+        query += " AND c.decision = :decision"
+        params["decision"] = decision
+    if failure_type:
+        query += " AND c.failure_type = :failure_type"
+        params["failure_type"] = failure_type
+
+    query += " ORDER BY c.created_at DESC"
+
+    rows = db.execute(text(query), params).mappings().fetchall()
+    
+    return [
+        CaseListItem(
+            case_id=str(r["case_id"]),
+            amount=r["amount"],
+            failure_type=r["failure_type"],
+            risk_score=r["risk_score"] if r["risk_score"] is not None else None,
+            evidence_coverage=r["evidence_coverage"] if r["evidence_coverage"] is not None else None,
+            decision=r["decision"],
+            state=r["state"],
+            created_at=r["created_at"]
+        ) for r in rows
+    ]
+
+@router.get("/{case_id}", response_model=CaseDetail)
+def get_case_detail(case_id: str, db: Session = Depends(get_db)):
+    case_row = db.execute(text("""
+        SELECT c.case_id, r.amount, c.failure_type, c.state, c.decision, c.created_at,
+               r.refund_id, r.payment_id, r.failure_reason,
+               cust.name as customer_name, cust.created_at as customer_created_at,
+               dest.type as dest_type, dest.identifier as dest_identifier,
+               dest.holder_name as dest_holder_name, dest.first_seen_at as dest_first_seen_at,
+               dest.times_used as dest_times_used
+        FROM refund_cases c
+        JOIN refunds r ON c.refund_id = r.refund_id
+        JOIN payments p ON r.payment_id = p.payment_id
+        JOIN customers cust ON p.customer_id = cust.customer_id
+        LEFT JOIN alternate_destinations dest ON c.proposed_destination_id = dest.destination_id
+        WHERE c.case_id = :id
+    """), {"id": case_id}).mappings().first()
+
+    if not case_row:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    # Audit events
+    audit_rows = db.execute(text("""
+        SELECT actor_type, action, reason, created_at
+        FROM audit_events
+        WHERE case_id = :id
+        ORDER BY created_at DESC
+    """), {"id": case_id}).mappings().fetchall()
+    
+    audit_events = [AuditEvent(**dict(a)) for a in audit_rows]
+
+    # Dynamically reconstruct evidence/risk view using existing deterministic functions
+    bundle = aggregate_evidence(case_id, db)
+    
+    # Check if there are extracted claims saved from the test harness or DB
+    claims_rows = db.execute(text("""
+        SELECT claim_text, claim_type 
+        FROM extracted_claims WHERE case_id = :id
+    """), {"id": case_id}).mappings().fetchall()
+    
+    # We also need message_risk_flags from risk_signals
+    risk_sig_row = db.execute(text("""
+        SELECT message_risk_flags, ownership_signal, name_similarity_score
+        FROM risk_signals WHERE case_id = :id
+    """), {"id": case_id}).mappings().first()
+    
+    if risk_sig_row and risk_sig_row["message_risk_flags"]:
+        import json
+        flags = risk_sig_row["message_risk_flags"]
+        if isinstance(flags, str):
+            flags = json.loads(flags)
+        msg_flags = MessageRiskFlags(**flags)
+    else:
+        msg_flags = MessageRiskFlags(
+            urgency_language=False, third_party_destination=False,
+            avoid_verified_channel=False, instruction_manipulation=False
+        )
+        
+    extracted_claims = ExtractedClaims(
+        claims=[{"claim_type": r["claim_type"], "claim_text": r["claim_text"]} for r in claims_rows],
+        message_risk_flags=msg_flags.model_dump()
+    )
+    
+    # If no claims in DB, check if evaluation_cases has the payload (for synthetic HELD_OUT cases)
+    if not claims_rows:
+        eval_row = db.execute(text("SELECT case_payload FROM evaluation_cases WHERE case_payload->>'case_id' = :id"), {"id": case_id}).fetchone()
+        if eval_row and "extracted_claims" in eval_row.case_payload:
+            extracted_claims = ExtractedClaims(**eval_row.case_payload["extracted_claims"])
+            msg_flags = MessageRiskFlags(**extracted_claims.message_risk_flags.model_dump())
+    
+    # Run deterministic checks
+    checks = check_claims(extracted_claims, bundle)
+    coverage = None
+    from app.services.evidence_coverage import calculate_evidence_coverage
+    try:
+        coverage = calculate_evidence_coverage(bundle, checks)
+    except Exception:
+        pass
+        
+    risk_score = compute_risk_score(bundle, checks)
+    
+    # Get reasons
+    amount_paise = case_row["amount"]
+    known_dest = bool(bundle.get("destination_prior_uses", 0) > 0) if bundle.get("destination_prior_uses") is not None else False
+    
+    decision, reasons = evaluate_policy(
+        risk_score=risk_score,
+        evidence_coverage=coverage if coverage is not None else 100,
+        contradiction_results=checks,
+        message_risk_flags=msg_flags.model_dump(),
+        amount_paise=amount_paise,
+        known_destination=known_dest,
+        amount_matches_original=bundle.get("amount_matches_original", False),
+        risk_signals=bundle
+    )
+
+    # Reconstruct ClaimCheck for frontend
+    claim_checks_out = []
+    for chk in checks:
+        claim_checks_out.append(ClaimCheck(
+            claim_text=chk.get("claim_text", ""),
+            claim_type=chk.get("claim_type", ""),
+            status=chk.get("status", "UNVERIFIABLE"),
+            severity=chk.get("severity", "LOW"),
+            source=chk.get("source", "llm")
+        ))
+        
+    ownership = risk_sig_row["ownership_signal"] if risk_sig_row else bundle.get("ownership_signal", "UNAVAILABLE")
+
+    risk_signals = RiskSignals(
+        amount_matches_original=bundle.get("amount_matches_original"),
+        destination_age_days=bundle.get("destination_age_days"),
+        destination_prior_uses=bundle.get("destination_prior_uses"),
+        redirect_count_30d=bundle.get("redirect_count_30d"),
+        message_risk_flags=msg_flags,
+        name_similarity_score=bundle.get("name_similarity_score"),
+        ownership_signal=ownership
+    )
+    
+    proposed_dest = None
+    if case_row["dest_type"]:
+        proposed_dest = ProposedDestination(
+            type=case_row["dest_type"],
+            identifier=case_row["dest_identifier"],
+            holder_name=case_row["dest_holder_name"],
+            first_seen_at=case_row["dest_first_seen_at"],
+            times_used=case_row["dest_times_used"]
+        )
+        
+    return CaseDetail(
+        case_id=str(case_row["case_id"]),
+        amount=case_row["amount"],
+        failure_type=case_row["failure_type"],
+        state=case_row["state"],
+        decision=case_row["decision"],
+        created_at=case_row["created_at"],
+        refund=RefundInfo(
+            refund_id=case_row["refund_id"],
+            payment_id=case_row["payment_id"],
+            failure_reason=case_row["failure_reason"] or ""
+        ),
+        customer=CustomerInfo(
+            name=case_row["customer_name"],
+            created_at=case_row["customer_created_at"]
+        ),
+        proposed_destination=proposed_dest,
+        extracted_claims=claim_checks_out,
+        risk_signals=risk_signals,
+        evidence_coverage=coverage,
+        decision_reasons=reasons,
+        audit_events=audit_events
+    )
+
 
 class ReviewAction(str, Enum):
     APPROVE = "APPROVE"
