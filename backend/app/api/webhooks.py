@@ -41,9 +41,101 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
         
     event = payload.get("event")
-    if event not in ["refund.created", "refund.processed", "refund.failed", "refund.speed_changed"]:
+    refund_events = ["refund.created", "refund.processed", "refund.failed", "refund.speed_changed"]
+    payout_events = ["payout.processed", "payout.failed", "payout.reversed"]
+    
+    if event not in refund_events and event not in payout_events:
         return {"status": "ignored", "event": event}
         
+    if event in payout_events:
+        return handle_payout_webhook(event, payload, db)
+        
+    return handle_refund_webhook(event, payload, db)
+
+def handle_payout_webhook(event: str, payload: dict, db: Session):
+    payout_entity = payload.get("payload", {}).get("payout", {}).get("entity", {})
+    if not payout_entity:
+        raise HTTPException(status_code=400, detail="Missing payout entity in payload")
+        
+    payout_id = payout_entity.get("id")
+    if not payout_id:
+        raise HTTPException(status_code=400, detail="Missing payout_id")
+        
+    # Find the corresponding payout row and lock the case for update
+    row = db.execute(
+        text("""
+            SELECT p.case_id, p.status as current_payout_status, c.state as current_case_state
+            FROM payouts p
+            JOIN refund_cases c ON p.case_id = c.case_id
+            WHERE p.razorpay_payout_id = :payout_id
+            FOR UPDATE OF c
+        """),
+        {"payout_id": payout_id}
+    ).mappings().first()
+    
+    if not row:
+        # Ignore payout events for unknown payouts (could be unrelated to this system)
+        return {"status": "ignored", "reason": "unknown payout_id"}
+        
+    case_id = row["case_id"]
+    current_case_state = row["current_case_state"]
+    current_payout_status = row["current_payout_status"]
+    
+    new_payout_status = event.split(".")[1] # processed, failed, reversed
+    
+    # If the payout is already in the target status (idempotency), do nothing
+    if current_payout_status == new_payout_status:
+        db.commit()
+        return {"status": "success", "note": "idempotent"}
+        
+    if current_case_state != "PAYOUT_PENDING":
+        # Ignore or log if it's arriving late or out of order, but don't transition
+        db.commit()
+        return {"status": "ignored", "reason": f"case state is {current_case_state}"}
+        
+    # Update payouts table
+    db.execute(
+        text("UPDATE payouts SET status = :status, updated_at = now() WHERE razorpay_payout_id = :payout_id"),
+        {"status": new_payout_status, "payout_id": payout_id}
+    )
+    
+    from app.schemas.state import CaseState
+    from app.services.state_machine import validate_transition
+    
+    if new_payout_status == "processed":
+        validate_transition(CaseState(current_case_state), CaseState.PAYOUT_SUCCESS)
+        validate_transition(CaseState.PAYOUT_SUCCESS, CaseState.RESOLVED)
+        
+        db.execute(
+            text("UPDATE refund_cases SET state = 'RESOLVED', updated_at = now() WHERE case_id = :case_id"),
+            {"case_id": case_id}
+        )
+        db.execute(
+            text("""
+                INSERT INTO audit_events (case_id, actor_type, actor_id, action, reason)
+                VALUES (:case_id, 'SYSTEM', 'system', 'STATE_TRANSITION', 'Payout processed, case resolved')
+            """),
+            {"case_id": case_id}
+        )
+    elif new_payout_status in ("failed", "reversed"):
+        validate_transition(CaseState(current_case_state), CaseState.PAYOUT_FAILED)
+        
+        db.execute(
+            text("UPDATE refund_cases SET state = 'PAYOUT_FAILED', updated_at = now() WHERE case_id = :case_id"),
+            {"case_id": case_id}
+        )
+        db.execute(
+            text("""
+                INSERT INTO audit_events (case_id, actor_type, actor_id, action, reason)
+                VALUES (:case_id, 'SYSTEM', 'system', 'STATE_TRANSITION', :reason)
+            """),
+            {"case_id": case_id, "reason": f"Payout {new_payout_status}"}
+        )
+        
+    db.commit()
+    return {"status": "success"}
+
+def handle_refund_webhook(event: str, payload: dict, db: Session):
     refund_entity = payload.get("payload", {}).get("refund", {}).get("entity", {})
     if not refund_entity:
         raise HTTPException(status_code=400, detail="Missing refund entity in payload")
@@ -60,6 +152,9 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
     
     if not refund_id or not payment_id:
         raise HTTPException(status_code=400, detail="Missing refund_id or payment_id")
+
+    import logging
+    logger = logging.getLogger(__name__)
 
     # Check if payment exists safely
     payment_exists = db.execute(
