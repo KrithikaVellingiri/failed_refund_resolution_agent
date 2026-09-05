@@ -236,7 +236,62 @@ def run_evaluation():
             reason_codes=reasons
         )
         
+        # Save individual result temporarily
+        is_correct = (
+            (ground_truth == "LEGITIMATE" and decision == "APPROVE") or
+            (ground_truth == "AMBIGUOUS" and decision == "REVIEW") or
+            (ground_truth == "ADVERSARIAL" and decision == "REJECT")
+        )
+        metrics.case_results = getattr(metrics, "case_results", [])
+        metrics.case_results.append({
+            "eval_case_id": row.eval_case_id,
+            "predicted_decision": decision,
+            "ground_truth_label": ground_truth,
+            "is_correct": is_correct,
+            "latency_ms": latency_ms,
+            "reason_codes": json.dumps(reasons)
+        })
+        
     metrics.print_report()
+    
+    # Persist the evaluation run
+    import uuid
+    eval_run_id = str(uuid.uuid4())
+    
+    # Reconstruct the exact metrics for the dashboard
+    metrics_json = json.dumps({
+        "precision": 100.0 * metrics.tp_precision / metrics.total_reject if metrics.total_reject > 0 else 0,
+        "recall": 100.0 * metrics.tp_recall / metrics.total_adversarial if metrics.total_adversarial > 0 else 0,
+        "false_approval_rate": 100.0 * metrics.fp_far / metrics.total if metrics.total > 0 else 0,
+        "false_rejection_rate": 100.0 * metrics.fn_frr / metrics.total_legitimate if metrics.total_legitimate > 0 else 0,
+        "review_rate": 100.0 * metrics.total_review / metrics.total if metrics.total > 0 else 0,
+        "auto_resolution_rate": 100.0 * (metrics.total_approve + metrics.total_reject) / metrics.total if metrics.total > 0 else 0,
+        "average_latency": int(metrics.total_latency / metrics.total) if metrics.total > 0 else 0,
+        "duplicate_risk_detection_rate": 0,  # Duplicate risk is static per requirement
+        "confusion_matrix": metrics.confusion_matrix,
+        "exception_list": metrics.exceptions
+    })
+    
+    db.execute(text("""
+        INSERT INTO evaluation_runs (eval_run_id, dataset_version, policy_version, model_version, prompt_version, threshold_config, metrics)
+        VALUES (:id, 'v1', 'v1', 'gemini-1.5-pro', 'v1', '{"AUTO_APPROVAL_LIMIT": 500}', :metrics)
+    """), {"id": eval_run_id, "metrics": metrics_json})
+    
+    for cr in metrics.case_results:
+        db.execute(text("""
+            INSERT INTO evaluation_results (eval_run_id, eval_case_id, predicted_decision, ground_truth_label, is_correct, latency_ms, reason_codes)
+            VALUES (:run_id, :case_id, :pred, :gt, :is_correct, :lat, :reasons)
+        """), {
+            "run_id": eval_run_id,
+            "case_id": cr["eval_case_id"],
+            "pred": cr["predicted_decision"],
+            "gt": cr["ground_truth_label"],
+            "is_correct": cr["is_correct"],
+            "lat": cr["latency_ms"],
+            "reasons": cr["reason_codes"]
+        })
+        
+    db.commit()
     db.close()
 
 
